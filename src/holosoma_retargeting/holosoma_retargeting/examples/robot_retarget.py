@@ -152,8 +152,8 @@ def validate_config(cfg: RetargetingConfig) -> None:
     # Task-specific format requirements
     if cfg.task_type == "climbing" and cfg.data_format not in (None, "mocap"):
         raise ValueError("Climbing task requires 'mocap' data format")
-    if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh"):
-        raise ValueError("Object interaction requires 'smplh' data format")
+    if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh", "smplx"):
+        raise ValueError("Object interaction requires 'smplh' or 'smplx' data format")
     # robot_only accepts any format in the registry (already validated above)
 
 
@@ -254,12 +254,35 @@ def load_motion_data(
         object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
 
     elif task_type == "object_interaction":
-        pt_path = data_path / f"{task_name}.pt"
-        if not pt_path.exists():
-            raise FileNotFoundError(f"InterMimic data file not found: {pt_path}")
+        if data_format == "smplx":
+            # Custom split-source object interaction:
+            #   - human joints from an FK'd SMPL-X .npz (global_joint_positions + height)
+            #   - object pose from a separate .npy of shape (T, 7) = [qw, qx, qy, qz, x, y, z],
+            #     in the SAME Z-up, meters world frame as the human (e.g. from OptiTrack).
+            npz_file = data_path / f"{task_name}.npz"
+            if not npz_file.exists():
+                raise FileNotFoundError(f"SMPL-X human data file not found: {npz_file}")
+            human_data = np.load(str(npz_file))
+            human_joints = human_data["global_joint_positions"]
+            human_height = float(human_data["height"])
+            smpl_scale = constants.ROBOT_HEIGHT / human_height
 
-        human_joints, object_poses = load_intermimic_data(str(pt_path))
-        smpl_scale = calculate_scale_factor(task_name, constants.ROBOT_HEIGHT)
+            object_npy = data_path / f"{task_name}_object.npy"
+            if not object_npy.exists():
+                raise FileNotFoundError(f"Object pose file not found: {object_npy}")
+            object_poses = np.load(str(object_npy))
+            if object_poses.shape[0] != human_joints.shape[0]:
+                raise ValueError(
+                    f"Object/human frame count mismatch: object has {object_poses.shape[0]} "
+                    f"frames, human has {human_joints.shape[0]}. They must be 1:1 aligned."
+                )
+        else:  # smplh / InterMimic .pt (bundled human + object)
+            pt_path = data_path / f"{task_name}.pt"
+            if not pt_path.exists():
+                raise FileNotFoundError(f"InterMimic data file not found: {pt_path}")
+
+            human_joints, object_poses = load_intermimic_data(str(pt_path))
+            smpl_scale = calculate_scale_factor(task_name, constants.ROBOT_HEIGHT)
 
     elif task_type == "climbing":
         task_dir = data_path / task_name
@@ -667,12 +690,16 @@ def main(cfg: RetargetingConfig) -> None:
     if task_type == "robot_only":
         human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
     elif task_type in {"object_interaction", "climbing"}:
+        # For the SMPL-X split-source object interaction the object can be held high (e.g. a
+        # dice in the hands), so scale it with the same floor-relative transform as the human.
+        object_scale_about_floor = task_type == "object_interaction" and data_format == "smplx"
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
             human_joints,
             retargeter,
             toe_names,
             scale=smpl_scale,
             object_poses=object_poses,
+            object_scale_about_floor=object_scale_about_floor,
         )
 
     # Initialize robot pose

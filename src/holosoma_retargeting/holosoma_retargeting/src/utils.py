@@ -212,6 +212,7 @@ def preprocess_motion_data(
     scale=0.714,
     mat_height=0.1,
     object_poses=None,
+    object_scale_about_floor=False,
 ):
     """
     Preprocess human joints and object poses for retargeting.
@@ -222,6 +223,12 @@ def preprocess_motion_data(
         retargeter: Retargeting object with smplh_joint2idx attribute.
         scale (float): Scaling factor.
         normalize_height (bool): Whether to normalize human joint heights.
+        object_scale_about_floor (bool): If True, scale the object position with the SAME
+            floor-relative affine as the human (z shifted by the human floor height, then all
+            axes scaled). Use this when the object is held/elevated (e.g. a dice in the hands)
+            so it stays co-located with the scaled-down robot hands. If False (default,
+            InterMimic/OMOMO behavior), the object z is scaled about its own first-frame height,
+            which only keeps near-ground objects consistent.
 
     Returns:
         tuple: (human_joints_scaled, object_poses_scaled, object_moving_frame_idx).
@@ -241,10 +248,17 @@ def preprocess_motion_data(
     human_joints = human_joints * scale
 
     if object_poses is not None:
-        object_poses[:, -3:-1] = object_poses[:, -3:-1] * scale
-        object_z0 = object_poses[0, -1]
-        dz_scale = (object_poses[:, -1] - object_z0) * scale
-        object_poses[:, -1] = object_z0 + dz_scale
+        if object_scale_about_floor:
+            # Same floor-relative transform as the human: shift z by the floor height, then
+            # scale x, y, z uniformly about the (shifted) origin. Keeps the object locked to
+            # the scaled human hands regardless of how high it is held.
+            object_poses[:, -3:-1] = object_poses[:, -3:-1] * scale
+            object_poses[:, -1] = (object_poses[:, -1] - z_min) * scale
+        else:
+            object_poses[:, -3:-1] = object_poses[:, -3:-1] * scale
+            object_z0 = object_poses[0, -1]
+            dz_scale = (object_poses[:, -1] - object_z0) * scale
+            object_poses[:, -1] = object_z0 + dz_scale
 
         object_moving_frame_idx = extract_object_first_moving_frame(object_poses)
 
